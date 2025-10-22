@@ -173,9 +173,7 @@ else:
 st.subheader("2) Tải ảnh để dự đoán")
 img_file = st.file_uploader("Chọn ảnh", type=["jpg", "jpeg", "png", "bmp", "tif", "tiff"])
 
-# Cho phép chỉnh norm nếu biết mô hình cần -1..1
-norm_opt = st.selectbox("Chuẩn hoá đầu vào", ["0_1 (mặc định)", "-1_1"], index=0)
-norm_to_use = "0_1" if "0_1" in norm_opt else "-1_1"
+norm_to_use = "0_1"
 
 predict_btn = st.button("🚀 Dự đoán")
 
