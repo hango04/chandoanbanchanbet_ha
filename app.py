@@ -1,160 +1,197 @@
-# app.py
+# app.py — Streamlit UI: upload CSV + ảnh (ZIP) rồi train (self-contained, không import VietNam.py)
 import os, io, zipfile, shutil
 import streamlit as st
 import numpy as np
 import pandas as pd
+import cv2
+import matplotlib.pyplot as plt
 
-from VietNam import (  # dùng lại các hàm đã refactor trong VietNam.py
-    preprocess_image, show_before_after, safe_read_csv, load_dataset,
-    build_model, plot_training_history, plot_right_wrong_counts, plot_confusion
-)
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import precision_score, recall_score, f1_score
-import tensorflow as tf
+from sklearn.metrics import precision_score, recall_score, f1_score, confusion_matrix
 
+import tensorflow as tf
+from tensorflow.keras.utils import to_categorical
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import Conv2D, MaxPooling2D, Flatten, Dense
+from tensorflow.keras.optimizers import Adam
 
 st.set_page_config(page_title="Chẩn đoán bàn chân", layout="wide")
 st.title("🦶 Chẩn đoán bàn chân (VN) – Streamlit")
 
-st.markdown("Tải **CSV** và **ảnh (ZIP)** rồi bấm **Train**. App sẽ không yêu cầu file có sẵn trong repo.")
+# ---------- Helpers (tự chứa) ----------
+def preprocess_image(path):
+    img = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
+    if img is None:
+        return None
+    img = cv2.equalizeHist(img)
+    kernel = np.array([[0, -1, 0],
+                       [-1, 5, -1],
+                       [0, -1, 0]], dtype=np.float32)
+    img = cv2.filter2D(img, -1, kernel)
+    img = cv2.resize(img, (224, 224)).astype("float32") / 255.0
+    return img
 
-# Khu vực upload
-csv_file = st.file_uploader("📄 Tải lên CSV (VietNam.csv)", type=["csv"])
-zip_file = st.file_uploader("🗂️ Tải lên ảnh (ZIP thư mục images/VietNam/...)", type=["zip"])
+def load_dataset(csv_path, image_folder, name_col='tên', label_col='nhãn', num_classes=5):
+    if not os.path.exists(csv_path):
+        raise FileNotFoundError(f"Không thấy CSV: {csv_path}")
+    try:
+        df = pd.read_csv(csv_path, encoding="utf-8")
+    except UnicodeDecodeError:
+        df = pd.read_csv(csv_path, encoding="latin1")
+    df.columns = df.columns.str.strip().str.lower()
+    if name_col not in df.columns:
+        raise KeyError(f"Thiếu cột '{name_col}'")
+    if label_col not in df.columns:
+        raise KeyError(f"Thiếu cột '{label_col}'")
 
-name_col = st.text_input("Tên cột chứa tên ảnh", value="tên")
-label_col = st.text_input("Tên cột chứa nhãn", value="nhãn")
-num_classes = st.number_input("Số lớp (num_classes)", min_value=2, max_value=20, value=5, step=1)
+    X, y, miss, bad = [], [], 0, 0
+    for _, row in df.iterrows():
+        fn = str(row[name_col]).strip()
+        lb = int(row[label_col])
+        p = os.path.join(image_folder, fn)
+        if not os.path.exists(p):
+            miss += 1
+            continue
+        im = preprocess_image(p)
+        if im is None:
+            bad += 1
+            continue
+        X.append(im)
+        y.append(lb)
+    if miss or bad:
+        st.info(f"Ảnh thiếu: {miss} | Ảnh đọc lỗi: {bad}")
+    if not X:
+        raise RuntimeError("Không nạp được mẫu nào.")
+    X = np.array(X, dtype=np.float32).reshape(-1, 224, 224, 1)
+    y = to_categorical(np.array(y, dtype=np.int32), num_classes=num_classes)
+    return X, y
 
-# Nơi làm việc tạm thời
+def build_model(num_classes=5):
+    m = Sequential([
+        Conv2D(32,(3,3),activation='relu',input_shape=(224,224,1)),
+        MaxPooling2D(2,2),
+        Conv2D(64,(3,3),activation='relu'),
+        MaxPooling2D(2,2),
+        Flatten(),
+        Dense(128,activation='relu'),
+        Dense(num_classes,activation='softmax')
+    ])
+    m.compile(optimizer=Adam(5e-5), loss='categorical_crossentropy', metrics=['accuracy'])
+    return m
+
+def plot_training_history(history):
+    fig, ax = plt.subplots(1,2,figsize=(10,4))
+    ax[0].plot(history.history.get('accuracy', []), label='Train')
+    ax[0].plot(history.history.get('val_accuracy', []), label='Val')
+    ax[0].set_title('Accuracy'); ax[0].legend()
+
+    ax[1].plot(history.history.get('loss', []), label='Train')
+    ax[1].plot(history.history.get('val_loss', []), label='Val')
+    ax[1].set_title('Loss'); ax[1].legend()
+    st.pyplot(fig)
+
+def plot_right_wrong_counts(y_true, y_pred, num_classes):
+    corr = np.zeros(num_classes); inc = np.zeros(num_classes)
+    for t,p in zip(y_true,y_pred):
+        if t==p: corr[t]+=1
+        else: inc[t]+=1
+    x = np.arange(num_classes); labels=[f'Lớp {i}' for i in range(num_classes)]
+    fig = plt.figure(figsize=(10,4))
+    plt.bar(x-0.35/2, corr, 0.35, label='Đúng')
+    plt.bar(x+0.35/2, inc, 0.35, label='Sai')
+    plt.xticks(x, labels); plt.legend(); plt.title('Đúng/Sai theo nhãn'); plt.tight_layout()
+    st.pyplot(fig)
+
+def plot_confusion(y_true, y_pred, num_classes):
+    cm = confusion_matrix(y_true, y_pred)
+    fig = plt.figure(figsize=(6,5))
+    plt.imshow(cm, interpolation='nearest'); plt.title('Confusion Matrix'); plt.colorbar()
+    ticks = np.arange(num_classes); names=[f'Nhãn {i}' for i in range(num_classes)]
+    plt.xticks(ticks, names, rotation=45); plt.yticks(ticks, names)
+    thresh = cm.max()/2 if cm.max()>0 else 0.5
+    for i in range(num_classes):
+        for j in range(num_classes):
+            plt.text(j, i, format(cm[i,j],'d'),
+                     ha="center", color="white" if cm[i,j]>thresh else "black")
+    plt.ylabel('Thực tế'); plt.xlabel('Dự đoán'); plt.tight_layout()
+    st.pyplot(fig)
+
+# ---------- UI ----------
+st.markdown("**Bước 1:** Upload CSV và ảnh (nén thành ZIP).  \n"
+            "**Bước 2:** Nhấn Train. (Nếu dataset lớn, hãy giảm epochs/batch)")
+
+csv_file = st.file_uploader("📄 CSV (có cột 'tên' & 'nhãn')", type=["csv"])
+zip_file = st.file_uploader("🗂️ Ảnh (ZIP)", type=["zip"])
+
+name_col = st.text_input("Tên cột ảnh", value="tên")
+label_col = st.text_input("Tên cột nhãn", value="nhãn")
+num_classes = st.number_input("Số lớp", 2, 20, 5, 1)
+
 work_dir = "/tmp/dataset"
-img_dir = os.path.join(work_dir, "images", "VietNam")
 csv_path = os.path.join(work_dir, "data", "VietNam.csv")
-
-# Chuẩn bị thư mục
+img_root = os.path.join(work_dir, "images")
+img_dir  = os.path.join(img_root, "VietNam")
 os.makedirs(os.path.dirname(csv_path), exist_ok=True)
-os.makedirs(img_dir, exist_ok=True)
+os.makedirs(img_root, exist_ok=True)
 
-# Khi người dùng upload CSV
 if csv_file is not None:
     with open(csv_path, "wb") as f:
         f.write(csv_file.read())
-    st.success(f"Đã lưu CSV vào {csv_path}")
+    st.success(f"Đã lưu CSV → {csv_path}")
 
-# Khi người dùng upload ZIP ảnh
 if zip_file is not None:
-    # Xóa ảnh cũ & giải nén mới
-    if os.path.exists(os.path.join(work_dir, "images")):
-        shutil.rmtree(os.path.join(work_dir, "images"))
-    os.makedirs(os.path.join(work_dir, "images"), exist_ok=True)
-
+    if os.path.exists(img_root):
+        shutil.rmtree(img_root)
+    os.makedirs(img_root, exist_ok=True)
     with zipfile.ZipFile(io.BytesIO(zip_file.read())) as z:
-        z.extractall(os.path.join(work_dir, "images"))
-    st.success("Đã giải nén ảnh vào /tmp/dataset/images")
-
-    # Tìm thư mục con VietNam nếu người dùng nén cả folder khác tên
-    # Nếu không có VietNam, cố gắng đoán:
+        z.extractall(img_root)
+    # Nếu không có folder VietNam, đoán thư mục ảnh
     if not os.path.exists(img_dir):
-        # lấy folder ảnh sâu nhất chứa nhiều file .jpg/.png
-        candidate = None
-        for root, dirs, files in os.walk(os.path.join(work_dir, "images")):
-            if any(f.lower().endswith((".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff")) for f in files):
-                candidate = root
+        for root, _, files in os.walk(img_root):
+            if any(f.lower().endswith((".jpg",".jpeg",".png",".bmp",".tif",".tiff")) for f in files):
+                img_dir = root
                 break
-        if candidate:
-            img_dir = candidate
-            st.info(f"Ảnh tìm thấy ở: {img_dir}")
+    st.success(f"Ảnh đã giải nén. Thư mục dùng: {img_dir}")
 
-st.divider()
+c1, c2, c3 = st.columns(3)
+with c1: epochs = st.number_input("Epochs", 1, 200, 15)
+with c2: batch  = st.number_input("Batch size", 1, 256, 32)
+with c3: val_split = st.slider("Validation split", 0.05, 0.4, 0.2, 0.05)
 
-# Tham số huấn luyện
-col1, col2, col3 = st.columns(3)
-with col1:
-    epochs = st.number_input("Epochs", 1, 200, 15, 1)  # giữ thấp cho Cloud
-with col2:
-    batch = st.number_input("Batch size", 1, 256, 32, 1)
-with col3:
-    val_split = st.slider("Validation split", 0.05, 0.4, 0.2, 0.05)
-
-train_btn = st.button("🚀 Train")
-
-if train_btn:
-    # Kiểm tra đủ file
+if st.button("🚀 Train"):
     if not os.path.exists(csv_path):
-        st.error("Chưa có CSV. Hãy upload trước.")
-        st.stop()
+        st.error("Chưa upload CSV."); st.stop()
     if not os.path.exists(img_dir):
-        st.error("Chưa có thư mục ảnh. Hãy upload ZIP ảnh trước.")
-        st.stop()
+        st.error("Chưa upload ZIP ảnh."); st.stop()
 
     with st.spinner("Đang nạp dữ liệu..."):
-        try:
-            # dùng load_dataset từ VietNam.py
-            X, y = load_dataset(csv_path, img_dir, name_col=name_col, label_col=label_col, num_classes=num_classes)
-        except Exception as e:
-            st.exception(e)
-            st.stop()
-
+        X, y = load_dataset(csv_path, img_dir, name_col=name_col, label_col=label_col, num_classes=int(num_classes))
     y_int = np.argmax(y, axis=1)
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.2, random_state=42, stratify=y_int
-    )
+    Xtr, Xte, ytr, yte = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y_int)
 
-    model = build_model(num_classes=num_classes)
-
-    cb = [
-        tf.keras.callbacks.EarlyStopping(monitor='val_loss', patience=3, restore_best_weights=True)
-    ]
+    model = build_model(num_classes=int(num_classes))
+    cb = [tf.keras.callbacks.EarlyStopping(monitor='val_loss', patience=3, restore_best_weights=True)]
 
     with st.spinner("Đang huấn luyện..."):
-        history = model.fit(
-            X_train, y_train,
-            validation_split=val_split,
-            epochs=int(epochs),
-            batch_size=int(batch),
-            callbacks=cb,
-            verbose=0
-        )
+        history = model.fit(Xtr, ytr, validation_split=float(val_split),
+                            epochs=int(epochs), batch_size=int(batch), verbose=0, callbacks=cb)
 
-    loss, acc = model.evaluate(X_test, y_test, verbose=0)
-    st.success(f"✅ Accuracy (test): **{acc:.2%}**")
+    loss, acc = model.evaluate(Xte, yte, verbose=0)
+    st.success(f"✅ Test accuracy: **{acc:.2%}**")
 
-    # Dự đoán & metrics
-    y_pred = model.predict(X_test, verbose=0)
-    y_pred_classes = np.argmax(y_pred, axis=1)
-    y_true_classes = np.argmax(y_test, axis=1)
+    y_pred = model.predict(Xte, verbose=0)
+    y_pred_cls = np.argmax(y_pred, axis=1)
+    y_true_cls = np.argmax(yte, axis=1)
 
-    precision = precision_score(y_true_classes, y_pred_classes, average=None, zero_division=0)
-    recall    = recall_score(y_true_classes, y_pred_classes, average=None, zero_division=0)
-    f1        = f1_score(y_true_classes, y_pred_classes, average=None, zero_division=0)
+    st.write("**Precision:**", precision_score(y_true_cls, y_pred_cls, average=None, zero_division=0))
+    st.write("**Recall:**",    recall_score(y_true_cls, y_pred_cls, average=None, zero_division=0))
+    st.write("**F1-score:**",  f1_score(y_true_cls, y_pred_cls, average=None, zero_division=0))
 
-    st.write("**Precision:**", precision)
-    st.write("**Recall:**", recall)
-    st.write("**F1-score:**", f1)
+    plot_training_history(history)
+    plot_right_wrong_counts(y_true_cls, y_pred_cls, int(num_classes))
+    plot_confusion(y_true_cls, y_pred_cls, int(num_classes))
 
-    # Vẽ biểu đồ
-    st.subheader("Biểu đồ huấn luyện")
-    import matplotlib.pyplot as plt
-    fig1 = plt.figure(figsize=(8,3)); 
-    # tái sử dụng hàm vẽ trong VietNam.py
-    from VietNam import plot_training_history as _pth
-    _pth(history)  # sẽ hiện ngay nhờ Streamlit hook
-    st.pyplot(fig1)
-
-    st.subheader("Đúng/Sai theo nhãn")
-    fig2 = plt.figure(figsize=(8,3))
-    from VietNam import plot_right_wrong_counts as _prwc
-    _prwc(y_true_classes, y_pred_classes, num_classes)
-    st.pyplot(fig2)
-
-    st.subheader("Confusion Matrix")
-    fig3 = plt.figure(figsize=(5,4))
-    from VietNam import plot_confusion as _pc
-    _pc(y_true_classes, y_pred_classes, num_classes)
-    st.pyplot(fig3)
-
-    # Lưu model
-    os.makedirs("/app/models", exist_ok=True) if os.path.exists("/app") else os.makedirs("./models", exist_ok=True)
+    os.makedirs("./models", exist_ok=True)
     model_path = "./models/flatfoot_streamlit.keras"
     model.save(model_path)
     st.success(f"💾 Model saved to `{model_path}`")
