@@ -140,52 +140,34 @@ def load_onnx(tmp_path):
     return predict_fn, (h, w, c), norm_hint
 
 
-# ====== Tải model ======
+# ====== Tải model tự động trong thư mục dự án ======
 st.subheader("1) Tải model")
-model_file = st.file_uploader("Chọn model (*.keras, *.h5, *.tflite, *.zip SavedModel, *.onnx)", 
-                              type=["keras", "h5", "tflite", "zip", "onnx"])
 
+default_model_path = "flatfoot_model_VietNam_light.keras"
 predict_fn = None
-input_shape = (224, 224, 1)
+input_shape = (224, 224, 3)  # vì bạn huấn luyện với MobileNetV2 (RGB)
 norm_hint = "0_1"
 
-if model_file is not None:
-    with st.spinner("Đang tải model..."):
-        suffix = os.path.splitext(model_file.name)[1].lower()
+# Nếu file model có sẵn trong repo
+if os.path.exists(default_model_path):
+    with st.spinner("Đang tải model từ thư mục..."):
         try:
-            if suffix in [".keras", ".h5"]:
-                with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-                    tmp.write(model_file.read())
-                    tmp_path = tmp.name
-                predict_fn, input_shape, norm_hint = load_keras_or_h5(tmp_path)
-                os.unlink(tmp_path)
+            model = load_model(default_model_path)
+            ishape = model.inputs[0].shape
+            h, w, c = int(ishape[1]), int(ishape[2]), int(ishape[3])
 
-            elif suffix == ".zip":
-                # SavedModel (folder) được nén thành .zip
-                # Streamlit cho file-like object, pass trực tiếp
-                predict_fn, input_shape, norm_hint = load_savedmodel_zip(model_file)
+            def predict_fn(x):
+                return model.predict(x.astype(np.float32), verbose=0)
 
-            elif suffix == ".tflite":
-                with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-                    tmp.write(model_file.read())
-                    tmp_path = tmp.name
-                predict_fn, input_shape, norm_hint = load_tflite(tmp_path)
-                os.unlink(tmp_path)
-
-            elif suffix == ".onnx":
-                with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-                    tmp.write(model_file.read())
-                    tmp_path = tmp.name
-                predict_fn, input_shape, norm_hint = load_onnx(tmp_path)
-                os.unlink(tmp_path)
-
-            else:
-                st.error("Định dạng chưa hỗ trợ.")
-
-            st.success(f"✅ Model đã tải. Input shape kỳ vọng: {input_shape}")
+            input_shape = (h, w, c)
+            st.success(f"✅ Model đã tải: {default_model_path} (Input shape: {input_shape})")
 
         except Exception as e:
-            st.error(f"Không load được model: {e}")
+            st.error(f"Không load được model mặc định: {e}")
+
+else:
+    st.error(f"❌ Không tìm thấy model {default_model_path}. Hãy chắc rằng file nằm cùng thư mục app.py")
+
 
 # ====== Upload ảnh và dự đoán ======
 st.subheader("2) Tải ảnh để dự đoán")
