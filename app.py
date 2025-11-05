@@ -175,12 +175,8 @@ if model_file is not None:
 st.subheader("2) Ảnh & Chuẩn hoá")
 img_file = st.file_uploader("Chọn ảnh", type=["jpg", "jpeg", "png", "bmp", "tif", "tiff"])
 
-norm_to_use = st.radio(
-    "Chuẩn hoá đầu vào",
-    options=["neg1_1", "0_1"],
-    index=0 if norm_default == "neg1_1" else 1,
-    help="Nếu model train với MobileNetV2 + mb_preprocess → chọn neg1_1 (mặc định)."
-)
+norm_to_use = "0_1"
+
 
 if st.button("🚀 Dự đoán"):
     if predict_fn is None:
