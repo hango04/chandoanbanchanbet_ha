@@ -225,9 +225,3 @@ if st.button("🚀 Dự đoán"):
                     st.error(f"Lỗi khi dự đoán: {e}")
 
 st.divider()
-st.caption(
-    "Lưu ý: Nếu chạy trên Streamlit Community Cloud, upload model thường bị giới hạn ~200 MB. "
-    "Khi đó hãy chọn **Model trong thư mục app** và đặt file `.keras` cạnh `app_streamlit.py`, "
-    "hoặc tải từ URL về máy chủ trước (ví dụ dùng `gdown` / `wget`). "
-    "Model train với MobileNetV2 nên đầu vào được scale **[-1,1]** (mặc định đã bật)."
-)
