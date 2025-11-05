@@ -1,3 +1,4 @@
 libgl1
 libglib2.0-0
-ttf-dejavu
+fonts-dejavu-core
+fonts-noto-core
