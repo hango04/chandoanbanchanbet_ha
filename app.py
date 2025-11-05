@@ -149,7 +149,8 @@ model_file = st.file_uploader(
 )
 predict_fn = None
 input_shape = (224, 224, 3)
-norm_default = "neg1_1"  # mặc định cho MobileNetV2
+norm_default = "0_1"
+
 
 if model_file is not None:
     suffix = os.path.splitext(model_file.name)[1].lower()
