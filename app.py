@@ -330,7 +330,7 @@ if st.button("🚀 Dự đoán"):
                     scale = max(0.6, min(1.2, w_img/800))
                     cv2.putText(rgb, text, (20, int(40*scale)),
                                 cv2.FONT_HERSHEY_SIMPLEX, scale, (0,255,0), 2, cv2.LINE_AA)
-                    st.image(rgb, caption="Ảnh có gắn nhãn dự đoán", use_container_width=True)
+                    st.image(rgb, caption="Ảnh có gắn nhãn dự đoán", use_container_width="stretch")
 
                     st.markdown("#### Xác suất từng lớp")
                     for i, p in enumerate(probs[0].tolist()):
