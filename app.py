@@ -1,16 +1,16 @@
+# app_streamlit.py
 import streamlit as st
 from tensorflow.keras.models import load_model
 import tensorflow as tf
 import numpy as np
-import cv2, os, io, json, zipfile, tempfile
+import cv2, os, io, zipfile, tempfile, json
 
-# ====== Cấu hình trang ======
-st.set_page_config(page_title="Dự đoán bàn chân", layout="centered")
+st.set_page_config(page_title="🦶 Dự đoán bàn chân (X-ray)", layout="centered")
 st.title("🦶 Dự đoán nhãn bàn chân từ ảnh (1 ảnh)")
 st.caption("Upload model: .keras, .h5, .tflite, SavedModel (.zip), hoặc .onnx (cần onnxruntime).")
 
-# ====== Ánh xạ nhãn (fallback nếu không upload label_map.json) ======
-DEFAULT_LABEL_MAP = {
+# ====== LABEL MAP CỐ ĐỊNH (không cần upload) ======
+LABEL_MAP = {
     0: "Binh thuong",
     1: "Bet nhe",
     2: "Bet trung bình",
@@ -19,61 +19,68 @@ DEFAULT_LABEL_MAP = {
 }
 
 # ---------- Utilities ----------
-def ensure_3ch(x1ch):
+def ensure_3ch(x1ch: np.ndarray) -> np.ndarray:
     # (H,W,1) -> (H,W,3)
     return np.repeat(x1ch, 3, axis=-1)
 
-def preprocess_image_for_shape(image_bytes, target_hw=(224,224), channels=3, norm="neg1_1"):
+def preprocess_image_for_shape(image_bytes: bytes, target_hw=(224,224), channels=3, norm="neg1_1"):
     """
     Đọc bytes -> trả (rgb_for_show, x[1,H,W,C] float32)
     - target_hw: (H,W)
-    - channels: 1 hoặc 3
-    - norm: "0_1" (0..1) hoặc "neg1_1" (-1..1)
+    - channels: 1 hoặc 3 (theo input model)
+    - norm: "neg1_1" (mặc định, tương đương mb_preprocess) hoặc "0_1"
     """
     file_bytes = np.frombuffer(image_bytes, np.uint8)
     bgr = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)  # BGR
     if bgr is None:
         return None, None
 
+    # X-ray style tiền xử lý nhẹ
     gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
     gray = cv2.equalizeHist(gray)
     kernel = np.array([[0, -1, 0],
                        [-1, 5, -1],
                        [0, -1, 0]], dtype=np.float32)
     gray = cv2.filter2D(gray, -1, kernel)
+
     h, w = target_hw
     gray = cv2.resize(gray, (w, h)).astype("float32")
 
     if norm == "0_1":
         gray = gray / 255.0
-    elif norm == "neg1_1":
-        # Tương đương mb_preprocess khi ảnh đầu vào 0..255 rồi scale về [-1,1]
+    else:  # "neg1_1"
         gray = (gray / 127.5) - 1.0
 
     if channels == 1:
         x = np.expand_dims(gray, axis=-1)  # (H,W,1)
     else:
-        x = np.expand_dims(gray, axis=-1)  # (H,W,1)
+        x = np.expand_dims(gray, axis=-1)
         x = ensure_3ch(x)                  # (H,W,3)
 
     x = np.expand_dims(x, axis=0)         # (1,H,W,C)
-    return cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB), x
+    rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+    return rgb, x
 
+# ---------- Loaders cho các định dạng ----------
+def _save_temp(suffix: str, data: bytes) -> str:
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+    tmp.write(data)
+    tmp.flush(); tmp.close()
+    return tmp.name
 
-# ----- Loaders theo định dạng -----
-def load_keras_or_h5(tmp_path):
+@st.cache_resource(show_spinner=False)
+def load_keras_or_h5(tmp_path: str):
     model = load_model(tmp_path)
     ishape = model.inputs[0].shape  # (None,H,W,C)
     h = int(ishape[1]); w = int(ishape[2]); c = int(ishape[3])
 
-    def predict_fn(x):
-        # Keras cần float32
-        probs = model.predict(x.astype(np.float32), verbose=0)
-        return probs
+    def predict_fn(x: np.ndarray):
+        return model.predict(x.astype(np.float32), verbose=0)
 
-    # Nếu model train bằng MobileNetV2 + mb_preprocess -> dùng -1..1
+    # Nếu train với MobileNetV2 + mb_preprocess -> dùng -1..1
     return predict_fn, (h, w, c), "neg1_1"
 
+@st.cache_resource(show_spinner=False)
 def load_savedmodel_zip(zip_bytes: bytes):
     tmpdir = tempfile.mkdtemp()
     with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
@@ -82,31 +89,32 @@ def load_savedmodel_zip(zip_bytes: bytes):
     ishape = model.inputs[0].shape
     h = int(ishape[1]); w = int(ishape[2]); c = int(ishape[3])
 
-    def predict_fn(x):
+    def predict_fn(x: np.ndarray):
         return model.predict(x.astype(np.float32), verbose=0)
 
     return predict_fn, (h, w, c), "neg1_1"
 
-def load_tflite(tmp_path):
+@st.cache_resource(show_spinner=False)
+def load_tflite(tmp_path: str):
     interpreter = tf.lite.Interpreter(model_path=tmp_path)
     interpreter.allocate_tensors()
     in_det = interpreter.get_input_details()[0]
     out_det = interpreter.get_output_details()[0]
-    ishape = in_det["shape"]  # e.g. [1,224,224,1] or [1,224,224,3]
+    ishape = in_det["shape"]  # [1,224,224,1] hoặc [1,224,224,3]
     h = int(ishape[1]); w = int(ishape[2]); c = int(ishape[3])
 
-    def predict_fn(x):
+    def predict_fn(x: np.ndarray):
         x_in = x.astype(in_det["dtype"])
         interpreter.set_tensor(in_det["index"], x_in)
         interpreter.invoke()
         y = interpreter.get_tensor(out_det["index"])
         return y.astype(np.float32)
 
-    # TFLite thường là 0..1, nhưng nếu bạn convert từ Keras (mb_preprocess)
-    # vẫn nên để "neg1_1". Bạn có thể đổi ở UI.
+    # Thường 0..1, nhưng nếu convert từ Keras MobileNetV2 hãy để -1..1 (user đổi trong UI)
     return predict_fn, (h, w, c), "neg1_1"
 
-def load_onnx(tmp_path):
+@st.cache_resource(show_spinner=False)
+def load_onnx(tmp_path: str):
     try:
         import onnxruntime as ort
     except ImportError as e:
@@ -115,13 +123,14 @@ def load_onnx(tmp_path):
     sess = ort.InferenceSession(tmp_path, providers=["CPUExecutionProvider"])
     in_name = sess.get_inputs()[0].name
     ishape = sess.get_inputs()[0].shape  # [1,C,H,W] hoặc [1,H,W,C]
+    # Suy NCHW
     is_nchw = (len(ishape) == 4 and isinstance(ishape[1], int) and ishape[1] in (1,3))
     if is_nchw:
         c = int(ishape[1]); h = int(ishape[2]); w = int(ishape[3])
     else:
         h = int(ishape[1]); w = int(ishape[2]); c = int(ishape[3])
 
-    def predict_fn(x):
+    def predict_fn(x: np.ndarray):
         x_in = x.astype(np.float32)
         if is_nchw:
             x_in = np.transpose(x_in, (0, 3, 1, 2))  # NHWC->NCHW
@@ -132,81 +141,47 @@ def load_onnx(tmp_path):
 
     return predict_fn, (h, w, c), "neg1_1"
 
-
-# ====== Khu vực upload model ======
+# ====== 1) Upload model ======
 st.subheader("1) Upload model")
 model_file = st.file_uploader(
     "Chọn file model (.keras, .h5, .tflite, .zip SavedModel, .onnx)",
     type=["keras", "h5", "tflite", "zip", "onnx"]
 )
-
-# (Tuỳ chọn) upload label map
-st.caption("Tuỳ chọn: Upload label_map.json (nếu có) để hiển thị tên nhãn đúng với model.")
-label_map_file = st.file_uploader("label_map.json (tuỳ chọn)", type=["json"])
-
-# Holder cho predict_fn
 predict_fn = None
 input_shape = (224, 224, 3)
-norm_default = "neg1_1"  # mặc định cho MobileNetV2 + mb_preprocess
+norm_default = "neg1_1"  # mặc định cho MobileNetV2
 
 if model_file is not None:
     suffix = os.path.splitext(model_file.name)[1].lower()
     try:
         with st.spinner("Đang tải model..."):
             if suffix in [".keras", ".h5"]:
-                # Lưu tạm ra file để load
-                tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
-                tmp.write(model_file.read())
-                tmp.flush(); tmp.close()
-                predict_fn, input_shape, norm_default = load_keras_or_h5(tmp.name)
-
+                path = _save_temp(suffix, model_file.read())
+                predict_fn, input_shape, norm_default = load_keras_or_h5(path)
             elif suffix == ".tflite":
-                tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".tflite")
-                tmp.write(model_file.read())
-                tmp.flush(); tmp.close()
-                predict_fn, input_shape, norm_default = load_tflite(tmp.name)
-
+                path = _save_temp(".tflite", model_file.read())
+                predict_fn, input_shape, norm_default = load_tflite(path)
             elif suffix == ".zip":
                 predict_fn, input_shape, norm_default = load_savedmodel_zip(model_file.read())
-
             elif suffix == ".onnx":
-                tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".onnx")
-                tmp.write(model_file.read())
-                tmp.flush(); tmp.close()
-                predict_fn, input_shape, norm_default = load_onnx(tmp.name)
-
+                path = _save_temp(".onnx", model_file.read())
+                predict_fn, input_shape, norm_default = load_onnx(path)
         st.success(f"✅ Model đã tải: {model_file.name} | Input shape: {input_shape}")
-
     except Exception as e:
         st.error(f"Không load được model: {e}")
 
-# ====== Label map xử lý ======
-label_map = DEFAULT_LABEL_MAP.copy()
-if label_map_file is not None:
-    try:
-        lm = json.loads(label_map_file.read().decode("utf-8"))
-        # Chuẩn hoá key -> int
-        label_map = {int(k): v for k, v in lm.items()}
-        st.success("✅ Đã nạp label_map.json")
-    except Exception as e:
-        st.error(f"Lỗi đọc label_map.json: {e}")
-else:
-    st.info("Không upload label_map.json → dùng LABEL_MAP mặc định.")
-
-# ====== Upload ảnh & tuỳ chọn chuẩn hoá ======
-st.subheader("2) Tải ảnh để dự đoán")
+# ====== 2) Ảnh + Chuẩn hoá ======
+st.subheader("2) Ảnh & Chuẩn hoá")
 img_file = st.file_uploader("Chọn ảnh", type=["jpg", "jpeg", "png", "bmp", "tif", "tiff"])
 
 norm_to_use = st.radio(
     "Chuẩn hoá đầu vào",
     options=["neg1_1", "0_1"],
     index=0 if norm_default == "neg1_1" else 1,
-    help="Nếu bạn train bằng MobileNetV2 + mb_preprocess → chọn neg1_1 (mặc định)."
+    help="Nếu model train với MobileNetV2 + mb_preprocess → chọn neg1_1 (mặc định)."
 )
 
-predict_btn = st.button("🚀 Dự đoán")
-
-if predict_btn:
+if st.button("🚀 Dự đoán"):
     if predict_fn is None:
         st.error("Vui lòng upload model trước.")
     elif img_file is None:
@@ -224,9 +199,9 @@ if predict_btn:
                     probs = predict_fn(x)
                     cls = int(np.argmax(probs))
                     conf = float(np.max(probs))
-                    desc = label_map.get(cls, f"Label {cls}")
+                    desc = LABEL_MAP.get(cls, f"Label {cls}")
 
-                    st.write(f"**Kết quả:** Nhãn `{cls}` – **{desc}** với độ tin cậy **{conf:.2%}**")
+                    st.success(f"**Kết quả:** Nhãn `{cls}` – **{desc}** với độ tin cậy **{conf:.2%}**")
 
                     # Vẽ text lên ảnh
                     text = f"Nhan {cls}: {desc} ({conf:.2%})"
@@ -236,14 +211,14 @@ if predict_btn:
                                 cv2.FONT_HERSHEY_SIMPLEX, scale, (0, 255, 0), 2, cv2.LINE_AA)
                     st.image(rgb, caption="Ảnh có gắn nhãn dự đoán", use_container_width=True)
 
-                    # Hiển thị phân bố xác suất
-                    with st.expander("Xem xác suất từng lớp"):
-                        for i, p in enumerate(probs[0].tolist()):
-                            st.write(f"- {i} ({label_map.get(i, str(i))}): {p:.6f}")
+                    # Bảng xác suất
+                    st.markdown("#### Xác suất từng lớp")
+                    for i, p in enumerate(probs[0].tolist()):
+                        st.write(f"- **{i}** ({LABEL_MAP.get(i, str(i))}): {p:.6f}")
 
                 except Exception as e:
                     st.error(f"Lỗi khi dự đoán: {e}")
 
 st.divider()
-st.caption("Mẹo: Nếu model train với MobileNetV2 + `mb_preprocess`, hãy dùng chuẩn hoá **-1..1** (đã mặc định). \
-Nếu model train với ảnh 0..1, hãy chọn **0..1**.")
+st.caption("Gợi ý: Dữ liệu đầu vào nên là **ảnh X-ray bàn chân** giống domain lúc huấn luyện. \
+Nếu model của bạn dùng pipeline khác, hãy đổi lựa chọn chuẩn hoá tương ứng.")
