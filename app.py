@@ -5,6 +5,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 # ================== CẤU HÌNH UI ==================
 st.set_page_config(page_title="🦶 Flatfoot X-ray Classifier", layout="centered")
+st.write("App boot OK")  # test marker
 st.title("🦶 Phân loại bàn chân bẹt từ X-ray")
 st.caption("Hỗ trợ model: .keras, .h5, .tflite, SavedModel (.zip)")
 
